@@ -1,0 +1,13 @@
+package net.blazemc.connectiondetector.model;
+
+public enum AuthenticationResult {
+    PREMIUM_VERIFIED,
+    CRACKED_ALLOWED,
+    PREMIUM_SESSION_MISSING,
+    PREMIUM_UUID_MISMATCH,
+    PREMIUM_OFFLINE_UUID_REJECTED,
+    CONCURRENT_LOGIN_DENIED,
+    INVALID_USERNAME,
+    PREMIUM_DISABLED,
+    DENIED
+}

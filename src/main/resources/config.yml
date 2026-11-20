@@ -1,0 +1,83 @@
+# =============================================================================
+# BlazeMC Connection Detector
+# BlazeMC Network
+# =============================================================================
+# This file controls selective Premium authentication on an offline-mode
+# Velocity proxy (online-mode = false) with Modern player forwarding.
+#
+# Reserved Premium usernames are forced through Mojang/Microsoft session
+# authentication. Every other username stays on the cracked/offline path so
+# LimboAuth can handle /register and /login.
+#
+# A username is NEVER treated as Premium just because it exists on Mojang,
+# because a client claimed it, or because a UUID was sent. A valid Mojang
+# session is mandatory for reserved Premium names.
+# =============================================================================
+
+general:
+  # Extra diagnostic logging to the Velocity console.
+  debug: false
+  # Message language. Only "en" is shipped with this version.
+  language: en
+
+authentication:
+  premium:
+    # Master switch for reserved Premium username protection.
+    enabled: true
+    # Call Velocity PreLoginEvent.forceOnlineMode() for reserved names.
+    # Requires a proxy with online-mode = false (the BlazeMC setup).
+    force-online-mode: true
+    # Reject the connection if Velocity did not complete a Mojang session.
+    # Never silently downgrade a reserved Premium username to cracked auth.
+    require-mojang-session: true
+    # Compare the authenticated Mojang UUID with the UUID stored at registration.
+    verify-registered-uuid: true
+  cracked:
+    # Track cracked identities separately from Premium profiles.
+    enabled: true
+    # Force offline-mode for usernames that are not reserved. This prevents
+    # LimboAuth or similar plugins from forcing online-mode for unreserved names.
+    preserve-offline-mode: true
+    # Enable the optional LimboAuth compatibility adapter when that plugin is loaded.
+    use-limboauth: true
+
+# Official Mojang profile lookup used ONLY for admin registration/refresh.
+# Login-time Premium decisions use the local database, not this API.
+# Endpoint: https://api.mojang.com/users/profiles/minecraft/{username}
+mojang:
+  api-timeout-ms: 5000
+  # In-memory cache for admin lookups. Cached records in SQLite remain available
+  # during Mojang outages and are always used for reserved-name protection.
+  cache-duration-minutes: 60
+  retry-count: 2
+  # If the Mojang API is down, refuse /bcd premium add and refresh.
+  # An API failure is NEVER treated as proof that an account is cracked.
+  fail-closed-on-api-error: true
+
+database:
+  # Only SQLite is supported. The file is created automatically on first start.
+  type: sqlite
+  # Path relative to this plugin's data directory.
+  file: database/identities.db
+
+limboauth:
+  # Isolated optional adapter. Does not modify LimboAuth's database or internals.
+  enabled: true
+  # auto    - attach when the limboauth plugin is present
+  # enabled - attach and warn if LimboAuth is missing
+  # disabled - never attach
+  compatibility-mode: auto
+
+logging:
+  log-premium-connections: true
+  log-cracked-connections: true
+  log-authentication-failures: true
+
+# Kick and command text. Adventure MiniMessage is not used; these are plain strings.
+messages:
+  prefix: "[BlazeMC Connection Detector] "
+  kick-invalid-username: "Invalid Minecraft username."
+  kick-premium-session-missing: "This username is reserved for a Minecraft Premium account. Sign in with the genuine Microsoft account."
+  kick-premium-uuid-mismatch: "Premium UUID verification failed. This username is protected."
+  kick-premium-auth-failed: "Premium authentication failed. This username cannot be used in offline mode."
+  kick-concurrent-login: "A connection for this Premium account is already in progress."

@@ -1,0 +1,82 @@
+plugins {
+    id 'java'
+    id 'com.gradleup.shadow' version '8.3.6'
+}
+
+group = 'net.blazemc'
+version = '1.0.0'
+description = 'Selective Premium authentication and UUID protection for BlazeMC Network'
+
+ext {
+    velocityApiVersion = '3.5.0-SNAPSHOT'
+}
+
+repositories {
+    mavenCentral()
+    maven {
+        name = 'papermc'
+        url = 'https://repo.papermc.io/repository/maven-public/'
+    }
+}
+
+dependencies {
+    compileOnly "com.velocitypowered:velocity-api:${velocityApiVersion}"
+    annotationProcessor "com.velocitypowered:velocity-api:${velocityApiVersion}"
+
+    implementation 'org.xerial:sqlite-jdbc:3.47.1.0'
+    implementation 'org.yaml:snakeyaml:2.3'
+
+    testImplementation "com.velocitypowered:velocity-api:${velocityApiVersion}"
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+    testImplementation 'org.yaml:snakeyaml:2.3'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release.set(21)
+    options.compilerArgs.add('-parameters')
+}
+
+tasks.withType(Javadoc).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat = 'full'
+        showStandardStreams = false
+    }
+}
+
+shadowJar {
+    archiveBaseName.set('blazemc-connection-detector')
+    archiveClassifier.set('')
+    archiveVersion.set(project.version)
+
+    relocate 'org.yaml.snakeyaml', 'net.blazemc.connectiondetector.libs.snakeyaml'
+    mergeServiceFiles()
+
+    exclude 'META-INF/maven/**'
+    exclude 'META-INF/INDEX.LIST'
+}
+
+jar {
+    archiveClassifier.set('plain')
+}
+
+tasks.named('build') {
+    dependsOn tasks.named('shadowJar')
+}
+
+tasks.named('assemble') {
+    dependsOn tasks.named('shadowJar')
+}
