@@ -1,0 +1,85 @@
+# =============================================================================
+# BlazeMC Connection Detector 1.1.0
+# BlazeMC Network — mc.blazemc.ro
+# =============================================================================
+# Automatic hybrid authentication for an offline-mode Velocity proxy
+# (online-mode = false) with modern Paper forwarding.
+#
+# A Mojang Java profile lookup can mark a connection as PREMIUM_CANDIDATE.
+# Ownership is proven only after Velocity completes a real Mojang/Microsoft
+# session. HTTP errors are NEVER treated as "this name is cracked".
+# =============================================================================
+
+general:
+  # Extra diagnostic logging.
+  debug: false
+  # Message language. Only "en" is shipped.
+  language: en
+  # Forces fail-closed API handling and disables negative profile caching.
+  strict-security: true
+
+# Automatic Premium detection. /bcd premium add is optional and not required
+# for genuine Premium players.
+premium-detection:
+  enabled: true
+  automatic: true
+  require-real-profile: true
+  require-authenticated-session: true
+  verify-mojang-uuid: true
+  force-online-authentication: true
+  never-downgrade-to-cracked: true
+  protect-premium-usernames: true
+  # Reject unknown names when Mojang cannot be reached. Never offline-fallback.
+  fail-closed-on-api-error: true
+
+# Official lookup: https://api.mojang.com/users/profiles/minecraft/{username}
+# 200 = profile exists (id + name). 204/404 = no Java profile.
+# 403/429/5xx/timeouts = unavailable, not cracked.
+mojang:
+  api-timeout-ms: 5000
+  request-timeout-ms: 5000
+  positive-cache-seconds: 300
+  # 0 in strict mode. Do not cache "not found" long enough to create a hole.
+  negative-cache-seconds: 0
+  maximum-concurrent-requests: 20
+  retry-count: 2
+
+cracked:
+  enabled: true
+  # Only a definitive 204/404 may authorize the cracked/offline path.
+  require-definitive-profile-not-found: true
+  preserve-offline-uuid: true
+  use-limboauth: true
+
+limboauth:
+  enabled: true
+  # auto | enabled | disabled  (legacy key compatibility-mode is also read)
+  integration-mode: auto
+  prevent-premium-password-login: true
+
+uuid:
+  verify-backend-forwarding: true
+  prevent-premium-offline-uuid: true
+  preserve-existing-cracked-identities: true
+  never-auto-migrate: true
+
+database:
+  type: sqlite
+  file: database/identities.db
+
+logging:
+  log-premium-detection: true
+  log-premium-authentication: true
+  log-cracked-connections: true
+  log-uuid-verification: true
+  log-authentication-failures: true
+
+messages:
+  prefix: "[BlazeMC Connection Detector] "
+  kick-invalid-username: "Invalid Minecraft username."
+  kick-premium-session-missing: "This username belongs to a Minecraft Premium account. Sign in with the genuine Microsoft account."
+  kick-premium-uuid-mismatch: "Premium UUID verification failed. This username is protected."
+  kick-premium-auth-failed: "Premium authentication failed. This username cannot be used in offline mode."
+  kick-concurrent-login: "A connection for this Premium account is already in progress."
+  kick-mojang-unavailable: "Authentication servers are temporarily unavailable. Please retry in a moment."
+  kick-impersonation: "This username is protected. Cracked launchers cannot use Premium identities."
