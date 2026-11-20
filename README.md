@@ -16,7 +16,11 @@ This is **not** a Paper or Bukkit plugin.
 | Backend | Paper with **modern** player forwarding |
 | Proxy | `online-mode = false` |
 
-Built JAR:
+Download the ready-to-install plugin JAR:
+
+- Branch copy: [`dist/blazemc-connection-detector-1.0.0.jar`](https://github.com/vladgaming166-prog/BlazeMC-Connection-Detector/raw/cursor/blazemc-connection-detector-72e8/dist/blazemc-connection-detector-1.0.0.jar)
+
+Or build it yourself:
 
 ```
 build/libs/blazemc-connection-detector-1.0.0.jar
