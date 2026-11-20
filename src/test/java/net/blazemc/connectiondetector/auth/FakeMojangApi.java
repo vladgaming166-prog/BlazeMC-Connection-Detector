@@ -2,6 +2,7 @@ package net.blazemc.connectiondetector.auth;
 
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -34,6 +35,11 @@ public final class FakeMojangApi implements MojangApi {
     public MojangLookupResult lookupByUsername(String username) {
         calls.incrementAndGet();
         return responses.getOrDefault(UsernameValidator.normalizeKey(username), fallback);
+    }
+
+    @Override
+    public CompletableFuture<MojangLookupResult> lookupByUsernameAsync(String username) {
+        return CompletableFuture.completedFuture(lookupByUsername(username));
     }
 
     public static MojangProfile profile(String name, String uuid) {

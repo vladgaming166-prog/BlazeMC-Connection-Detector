@@ -48,63 +48,94 @@ public final class ConfigLoader {
 
         PluginConfig defaults = PluginConfig.defaults();
         Map<String, Object> general = child(root, "general");
-        Map<String, Object> authentication = child(root, "authentication");
-        Map<String, Object> premium = child(authentication, "premium");
-        Map<String, Object> cracked = child(authentication, "cracked");
+        Map<String, Object> premiumDetection = child(root, "premium-detection");
+        Map<String, Object> legacyAuth = child(root, "authentication");
+        Map<String, Object> legacyPremium = child(legacyAuth, "premium");
+        Map<String, Object> legacyCracked = child(legacyAuth, "cracked");
+        Map<String, Object> cracked = firstNonEmpty(child(root, "cracked"), legacyCracked);
         Map<String, Object> mojang = child(root, "mojang");
         Map<String, Object> database = child(root, "database");
         Map<String, Object> limboauth = child(root, "limboauth");
+        Map<String, Object> uuid = child(root, "uuid");
         Map<String, Object> logging = child(root, "logging");
         Map<String, Object> messages = child(root, "messages");
 
-        Map<String, String> messageValues = new LinkedHashMap<>();
-        messageValues.put("kick-invalid-username", defaults.messages().kickInvalidUsername());
-        messageValues.put("kick-premium-session-missing", defaults.messages().kickPremiumSessionMissing());
-        messageValues.put("kick-premium-uuid-mismatch", defaults.messages().kickPremiumUuidMismatch());
-        messageValues.put("kick-premium-auth-failed", defaults.messages().kickPremiumAuthFailed());
-        messageValues.put("kick-concurrent-login", defaults.messages().kickConcurrentLogin());
+        Map<String, String> messageValues = new LinkedHashMap<>(PluginConfig.Messages.defaults().values());
         for (Map.Entry<String, Object> entry : messages.entrySet()) {
             if (!"prefix".equals(entry.getKey()) && entry.getValue() != null) {
                 messageValues.put(entry.getKey(), String.valueOf(entry.getValue()));
             }
         }
 
+        int positiveCacheSeconds = integer(mojang, "positive-cache-seconds", defaults.mojang().positiveCacheSeconds());
+        if (!mojang.containsKey("positive-cache-seconds") && mojang.containsKey("cache-duration-minutes")) {
+            positiveCacheSeconds = integer(mojang, "cache-duration-minutes", 5) * 60;
+        }
+
+        boolean failClosed = bool(
+                premiumDetection,
+                "fail-closed-on-api-error",
+                bool(mojang, "fail-closed-on-api-error", defaults.premiumDetection().failClosedOnApiError())
+        );
+
         return new PluginConfig(
                 new PluginConfig.General(
                         bool(general, "debug", defaults.general().debug()),
-                        string(general, "language", defaults.general().language())
+                        string(general, "language", defaults.general().language()),
+                        bool(general, "strict-security", defaults.general().strictSecurity())
                 ),
-                new PluginConfig.Authentication(
-                        new PluginConfig.Premium(
-                                bool(premium, "enabled", defaults.authentication().premium().enabled()),
-                                bool(premium, "force-online-mode", defaults.authentication().premium().forceOnlineMode()),
-                                bool(premium, "require-mojang-session", defaults.authentication().premium().requireMojangSession()),
-                                bool(premium, "verify-registered-uuid", defaults.authentication().premium().verifyRegisteredUuid())
-                        ),
-                        new PluginConfig.Cracked(
-                                bool(cracked, "enabled", defaults.authentication().cracked().enabled()),
-                                bool(cracked, "preserve-offline-mode", defaults.authentication().cracked().preserveOfflineMode()),
-                                bool(cracked, "use-limboauth", defaults.authentication().cracked().useLimboauth())
-                        )
+                new PluginConfig.PremiumDetection(
+                        bool(premiumDetection, "enabled", bool(legacyPremium, "enabled", true)),
+                        bool(premiumDetection, "automatic", defaults.premiumDetection().automatic()),
+                        bool(premiumDetection, "require-real-profile", defaults.premiumDetection().requireRealProfile()),
+                        bool(premiumDetection, "require-authenticated-session",
+                                bool(legacyPremium, "require-mojang-session", true)),
+                        bool(premiumDetection, "verify-mojang-uuid",
+                                bool(legacyPremium, "verify-registered-uuid", true)),
+                        bool(premiumDetection, "force-online-authentication",
+                                bool(legacyPremium, "force-online-mode", true)),
+                        bool(premiumDetection, "never-downgrade-to-cracked", true),
+                        bool(premiumDetection, "protect-premium-usernames", true),
+                        failClosed
                 ),
                 new PluginConfig.Mojang(
                         integer(mojang, "api-timeout-ms", defaults.mojang().apiTimeoutMs()),
-                        integer(mojang, "cache-duration-minutes", defaults.mojang().cacheDurationMinutes()),
-                        integer(mojang, "retry-count", defaults.mojang().retryCount()),
-                        bool(mojang, "fail-closed-on-api-error", defaults.mojang().failClosedOnApiError())
+                        integer(mojang, "request-timeout-ms",
+                                integer(mojang, "api-timeout-ms", defaults.mojang().requestTimeoutMs())),
+                        positiveCacheSeconds,
+                        integer(mojang, "negative-cache-seconds", defaults.mojang().negativeCacheSeconds()),
+                        integer(mojang, "maximum-concurrent-requests", defaults.mojang().maximumConcurrentRequests()),
+                        integer(mojang, "retry-count", defaults.mojang().retryCount())
+                ),
+                new PluginConfig.Cracked(
+                        bool(cracked, "enabled", true),
+                        bool(cracked, "require-definitive-profile-not-found", true),
+                        bool(cracked, "preserve-offline-uuid", bool(cracked, "preserve-offline-mode", true)),
+                        bool(cracked, "use-limboauth", true)
+                ),
+                new PluginConfig.LimboAuth(
+                        bool(limboauth, "enabled", true),
+                        string(limboauth, "integration-mode",
+                                string(limboauth, "compatibility-mode", "auto")),
+                        bool(limboauth, "prevent-premium-password-login", true)
+                ),
+                new PluginConfig.Uuid(
+                        bool(uuid, "verify-backend-forwarding", true),
+                        bool(uuid, "prevent-premium-offline-uuid", true),
+                        bool(uuid, "preserve-existing-cracked-identities", true),
+                        bool(uuid, "never-auto-migrate", true)
                 ),
                 new PluginConfig.Database(
                         string(database, "type", defaults.database().type()),
                         string(database, "file", defaults.database().file())
                 ),
-                new PluginConfig.LimboAuth(
-                        bool(limboauth, "enabled", defaults.limboauth().enabled()),
-                        string(limboauth, "compatibility-mode", defaults.limboauth().compatibilityMode())
-                ),
                 new PluginConfig.Logging(
-                        bool(logging, "log-premium-connections", defaults.logging().logPremiumConnections()),
-                        bool(logging, "log-cracked-connections", defaults.logging().logCrackedConnections()),
-                        bool(logging, "log-authentication-failures", defaults.logging().logAuthenticationFailures())
+                        bool(logging, "log-premium-detection", true),
+                        bool(logging, "log-premium-authentication",
+                                bool(logging, "log-premium-connections", true)),
+                        bool(logging, "log-cracked-connections", true),
+                        bool(logging, "log-uuid-verification", true),
+                        bool(logging, "log-authentication-failures", true)
                 ),
                 new PluginConfig.Messages(
                         string(messages, "prefix", PluginConstants.LOG_PREFIX),
@@ -120,6 +151,10 @@ public final class ConfigLoader {
             return (Map<String, Object>) map;
         }
         return Map.of();
+    }
+
+    private static Map<String, Object> firstNonEmpty(Map<String, Object> primary, Map<String, Object> fallback) {
+        return primary.isEmpty() ? fallback : primary;
     }
 
     private static boolean bool(Map<String, Object> map, String key, boolean fallback) {

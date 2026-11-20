@@ -50,6 +50,9 @@ public final class BcdCommand implements SimpleCommand {
             case "status" -> status(source);
             case "debug" -> debug(source, args);
             case "lookup" -> lookup(source, args);
+            case "check" -> check(source, args);
+            case "cache" -> cache(source, args);
+            case "diagnostics" -> diagnostics(source, args);
             case "premium" -> premium(source, args);
             default -> source.sendMessage(Texts.error("Unknown subcommand. Use /bcd for help."));
         }
@@ -62,7 +65,10 @@ public final class BcdCommand implements SimpleCommand {
         source.sendMessage(Texts.muted("/bcd status - authentication system status"));
         source.sendMessage(Texts.muted("/bcd debug <player> - live identity diagnostics"));
         source.sendMessage(Texts.muted("/bcd lookup <username> - stored identity information"));
-        source.sendMessage(Texts.muted("/bcd premium add <username>"));
+        source.sendMessage(Texts.muted("/bcd check <username> - live Mojang profile classification"));
+        source.sendMessage(Texts.muted("/bcd cache refresh <username> - invalidate and refresh profile cache"));
+        source.sendMessage(Texts.muted("/bcd diagnostics <player> - full authentication diagnostics"));
+        source.sendMessage(Texts.muted("/bcd premium add <username> (optional reservation)"));
         source.sendMessage(Texts.muted("/bcd premium remove <username>"));
         source.sendMessage(Texts.muted("/bcd premium list"));
         source.sendMessage(Texts.muted("/bcd premium refresh <username>"));
@@ -94,19 +100,22 @@ public final class BcdCommand implements SimpleCommand {
         source.sendMessage(detail("Database", services.database().isOpen()
                 ? "SQLite OK (" + services.database().databaseFile().getFileName() + ")"
                 : "closed"));
-        source.sendMessage(detail("Reserved Premium accounts", String.valueOf(services.identities().premiumCount())));
+        source.sendMessage(detail("Cached Premium accounts", String.valueOf(services.identities().premiumCount())));
         source.sendMessage(detail("Identity records", String.valueOf(services.identities().identityCount())));
-        source.sendMessage(detail("Premium detection", enabled(config.authentication().premium().enabled())));
-        source.sendMessage(detail("Force online-mode", enabled(config.authentication().premium().forceOnlineMode())));
-        source.sendMessage(detail("Require Mojang session", enabled(config.authentication().premium().requireMojangSession())));
-        source.sendMessage(detail("Verify registered UUID", enabled(config.authentication().premium().verifyRegisteredUuid())));
-        source.sendMessage(detail("Cracked detection", enabled(config.authentication().cracked().enabled())));
-        source.sendMessage(detail("Preserve offline-mode", enabled(config.authentication().cracked().preserveOfflineMode())));
+        source.sendMessage(detail("Automatic Premium detection", enabled(config.premiumDetection().automatic())));
+        source.sendMessage(detail("Force online authentication", enabled(config.premiumDetection().forceOnlineAuthentication())));
+        source.sendMessage(detail("Require authenticated session", enabled(config.premiumDetection().requireAuthenticatedSession())));
+        source.sendMessage(detail("Verify Mojang UUID", enabled(config.premiumDetection().verifyMojangUuid())));
+        source.sendMessage(detail("Never downgrade to cracked", enabled(config.premiumDetection().neverDowngradeToCracked())));
+        source.sendMessage(detail("Cracked support", enabled(config.cracked().enabled())));
+        source.sendMessage(detail("Require definitive profile-not-found", enabled(config.cracked().requireDefinitiveProfileNotFound())));
+        source.sendMessage(detail("Preserve offline UUID", enabled(config.cracked().preserveOfflineUuid())));
         source.sendMessage(detail("LimboAuth adapter", services.limboAuth().attached()
                 ? "attached (" + services.limboAuth().detectedVersion() + ")"
                 : "inactive (" + services.limboAuth().detectedVersion() + ")"));
         source.sendMessage(detail("LimboAPI", services.limboAuth().limboApiVersion()));
-        source.sendMessage(detail("Fail-closed on Mojang API error", enabled(config.mojang().failClosedOnApiError())));
+        source.sendMessage(detail("Strict security / fail-closed", enabled(config.failClosed())));
+        source.sendMessage(detail("Negative cache seconds", String.valueOf(config.negativeCacheSeconds())));
         source.sendMessage(detail("Debug", enabled(config.debug())));
     }
 
@@ -139,6 +148,14 @@ public final class BcdCommand implements SimpleCommand {
                 );
         source.sendMessage(Texts.info("Live connection diagnostics for " + online.getUsername()));
         source.sendMessage(detail("Online-mode session", String.valueOf(online.isOnlineMode())));
+        if (session != null) {
+            sendDiagnostics(source, services.inspector().inspectLive(
+                    session,
+                    online.isOnlineMode(),
+                    limboStatus(online, session)
+            ));
+            return;
+        }
         sendReport(source, report);
     }
 
@@ -152,6 +169,135 @@ public final class BcdCommand implements SimpleCommand {
             return;
         }
         sendReport(source, services.inspector().inspectStored(args[1]));
+    }
+
+    private void check(CommandSource source, String[] args) {
+        if (!has(source, PluginConstants.PERMISSION_DEBUG) && !has(source, PluginConstants.PERMISSION_ADMIN)) {
+            deny(source);
+            return;
+        }
+        if (args.length < 2) {
+            source.sendMessage(Texts.error("Usage: /bcd check <username>"));
+            return;
+        }
+        String username = args[1];
+        runAsync(source, () -> {
+            var lookup = services.mojangApi().lookupByUsername(username);
+            source.sendMessage(Texts.info("Profile check for " + username));
+            source.sendMessage(detail("Mojang lookup status", lookup.status().name()));
+            source.sendMessage(detail("HTTP status", String.valueOf(lookup.httpStatus())));
+            if (lookup.profile().isPresent()) {
+                var profile = lookup.profile().get();
+                source.sendMessage(detail("Classification", "PREMIUM_CANDIDATE (session still required)"));
+                source.sendMessage(detail("Canonical username", profile.canonicalUsername()));
+                source.sendMessage(detail("Expected Mojang UUID", UuidNormalizer.toDashed(profile.uuid())));
+            } else if (lookup.status() == net.blazemc.connectiondetector.auth.MojangLookupResult.Status.NOT_FOUND) {
+                source.sendMessage(detail("Classification", "CRACKED_CONFIRMED (definitive profile-not-found)"));
+            } else {
+                source.sendMessage(detail("Classification", "MOJANG_API_UNAVAILABLE (fail-closed, not cracked)"));
+                source.sendMessage(detail("Detail", lookup.detail()));
+            }
+            Optional<PremiumAccount> reserved = services.authentication().findReserved(username);
+            source.sendMessage(detail(
+                    "Local Premium cache",
+                    reserved.map(account -> "yes " + UuidNormalizer.toDashed(account.mojangUuid()))
+                            .orElse("none")
+            ));
+        });
+    }
+
+    private void cache(CommandSource source, String[] args) {
+        if (!has(source, PluginConstants.PERMISSION_ADMIN) && !has(source, PluginConstants.PERMISSION_DEBUG)) {
+            deny(source);
+            return;
+        }
+        if (args.length < 3 || !args[1].equalsIgnoreCase("refresh")) {
+            source.sendMessage(Texts.error("Usage: /bcd cache refresh <username>"));
+            return;
+        }
+        String username = args[2];
+        runAsync(source, () -> {
+            if (services.mojangApi() != null) {
+                services.mojangApi().invalidate(username);
+            }
+            if (services.mojangCache() != null) {
+                services.mojangCache().invalidate(username);
+            }
+            var lookup = services.mojangApi().lookupByUsername(username);
+            source.sendMessage(Texts.ok("Cache refreshed for " + username + ": " + lookup.status()));
+            lookup.profile().ifPresent(profile -> source.sendMessage(detail(
+                    "Profile",
+                    profile.canonicalUsername() + " " + UuidNormalizer.toDashed(profile.uuid())
+            )));
+        });
+    }
+
+    private void diagnostics(CommandSource source, String[] args) {
+        if (!has(source, PluginConstants.PERMISSION_DEBUG)) {
+            deny(source);
+            return;
+        }
+        if (args.length < 2) {
+            source.sendMessage(Texts.error("Usage: /bcd diagnostics <player>"));
+            return;
+        }
+        Optional<Player> player = proxy.getPlayer(args[1]);
+        if (player.isEmpty()) {
+            source.sendMessage(Texts.warn("Player is not online. Showing stored diagnostics."));
+            sendDiagnostics(source, services.inspector().inspectStored(args[1]));
+            return;
+        }
+        Player online = player.get();
+        VerifiedSession session = services.connections().verifiedSession(online);
+        IdentityInspector.DiagnosticReport report = session == null
+                ? services.inspector().inspectStored(online.getUsername())
+                : services.inspector().inspectLive(session, online.isOnlineMode(), limboStatus(online, session));
+        source.sendMessage(Texts.info("Authentication diagnostics for " + online.getUsername()));
+        sendDiagnostics(source, report);
+    }
+
+    private void sendDiagnostics(CommandSource source, IdentityInspector.DiagnosticReport report) {
+        source.sendMessage(detail("Username", report.username()));
+        source.sendMessage(detail("Account type", String.valueOf(report.accountType())));
+        source.sendMessage(detail(
+                "Expected Mojang UUID",
+                report.expectedMojangUuid() == null ? "none" : UuidNormalizer.toDashed(report.expectedMojangUuid())
+        ));
+        source.sendMessage(detail(
+                "Authenticated UUID",
+                report.authenticatedUuid() == null ? "none" : UuidNormalizer.toDashed(report.authenticatedUuid())
+        ));
+        source.sendMessage(detail("UUID source", String.valueOf(report.uuidSource())));
+        source.sendMessage(detail("Online authentication status", String.valueOf(report.onlineAuthentication())));
+        source.sendMessage(detail("Session verification status", String.valueOf(report.sessionVerified())));
+        source.sendMessage(detail("Premium profile status", report.premiumProfileStatus()));
+        source.sendMessage(detail("Connection state", String.valueOf(report.connectionState())));
+        source.sendMessage(detail("LimboAuth integration status", report.limboAuthStatus()));
+        source.sendMessage(detail(
+                "Backend forwarding UUID",
+                report.backendForwardingIdentity() == null
+                        ? "none"
+                        : UuidNormalizer.toDashed(report.backendForwardingIdentity())
+        ));
+        source.sendMessage(detail("Final login decision", report.finalLoginDecision()));
+        if (report.hasSeparateCrackedAndPremiumProfiles()) {
+            source.sendMessage(Texts.warn(
+                    "Separate historical Cracked and Premium profiles exist. They are not merged."
+            ));
+        }
+    }
+
+    private String limboStatus(Player player, VerifiedSession session) {
+        if (services.limboAuth() == null || !services.limboAuth().attached()) {
+            return "adapter inactive";
+        }
+        if (session != null && session.verifiedPremium() && services.limboAuth().shouldBypass(player)) {
+            return "bypass Premium password login";
+        }
+        if (session != null && session.accountType() == net.blazemc.connectiondetector.model.AccountType.CRACKED) {
+            return "LimboAuth registration/login flow";
+        }
+        return "attached (" + services.limboAuth().detectedVersion() + ")";
     }
 
     private void sendReport(CommandSource source, IdentityInspector.DiagnosticReport report) {
@@ -356,18 +502,30 @@ public final class BcdCommand implements SimpleCommand {
     public List<String> suggest(Invocation invocation) {
         String[] args = invocation.arguments();
         if (args.length == 0) {
-            return List.of("reload", "status", "debug", "lookup", "premium");
+            return List.of("reload", "status", "debug", "lookup", "check", "cache", "diagnostics", "premium");
         }
         if (args.length == 1) {
-            return prefix(args[0], "reload", "status", "debug", "lookup", "premium");
+            return prefix(args[0], "reload", "status", "debug", "lookup", "check", "cache", "diagnostics", "premium");
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("premium")) {
             return prefix(args[1], "add", "remove", "list", "refresh", "rename");
         }
-        if (args.length == 2 && (args[0].equalsIgnoreCase("debug") || args[0].equalsIgnoreCase("lookup"))) {
+        if (args.length == 2 && args[0].equalsIgnoreCase("cache")) {
+            return prefix(args[1], "refresh");
+        }
+        if (args.length == 2 && (args[0].equalsIgnoreCase("debug")
+                || args[0].equalsIgnoreCase("lookup")
+                || args[0].equalsIgnoreCase("check")
+                || args[0].equalsIgnoreCase("diagnostics"))) {
             return proxy.getAllPlayers().stream()
                     .map(Player::getUsername)
                     .filter(name -> name.toLowerCase(Locale.ROOT).startsWith(args[1].toLowerCase(Locale.ROOT)))
+                    .toList();
+        }
+        if (args.length == 3 && args[0].equalsIgnoreCase("cache") && args[1].equalsIgnoreCase("refresh")) {
+            return proxy.getAllPlayers().stream()
+                    .map(Player::getUsername)
+                    .filter(name -> name.toLowerCase(Locale.ROOT).startsWith(args[2].toLowerCase(Locale.ROOT)))
                     .toList();
         }
         if (args.length == 3 && args[0].equalsIgnoreCase("premium") && args[1].equalsIgnoreCase("remove")) {

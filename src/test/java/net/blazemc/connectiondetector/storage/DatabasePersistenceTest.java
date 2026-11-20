@@ -69,6 +69,8 @@ class DatabasePersistenceTest {
                     record.accountType() == AccountType.CRACKED && record.uuid().equals(crackedUuid)));
             assertTrue(records.stream().anyMatch(record ->
                     record.accountType() == AccountType.PREMIUM && record.uuid().equals(premiumUuid)));
+            assertTrue(records.stream().noneMatch(record ->
+                    record.accountType() == AccountType.PREMIUM && record.uuid().equals(crackedUuid)));
         }
     }
 

@@ -1,83 +1,85 @@
 # =============================================================================
-# BlazeMC Connection Detector
-# BlazeMC Network
+# BlazeMC Connection Detector 1.1.0
+# BlazeMC Network — mc.blazemc.ro
 # =============================================================================
-# This file controls selective Premium authentication on an offline-mode
-# Velocity proxy (online-mode = false) with Modern player forwarding.
+# Automatic hybrid authentication for an offline-mode Velocity proxy
+# (online-mode = false) with modern Paper forwarding.
 #
-# Reserved Premium usernames are forced through Mojang/Microsoft session
-# authentication. Every other username stays on the cracked/offline path so
-# LimboAuth can handle /register and /login.
-#
-# A username is NEVER treated as Premium just because it exists on Mojang,
-# because a client claimed it, or because a UUID was sent. A valid Mojang
-# session is mandatory for reserved Premium names.
+# A Mojang Java profile lookup can mark a connection as PREMIUM_CANDIDATE.
+# Ownership is proven only after Velocity completes a real Mojang/Microsoft
+# session. HTTP errors are NEVER treated as "this name is cracked".
 # =============================================================================
 
 general:
-  # Extra diagnostic logging to the Velocity console.
+  # Extra diagnostic logging.
   debug: false
-  # Message language. Only "en" is shipped with this version.
+  # Message language. Only "en" is shipped.
   language: en
+  # Forces fail-closed API handling and disables negative profile caching.
+  strict-security: true
 
-authentication:
-  premium:
-    # Master switch for reserved Premium username protection.
-    enabled: true
-    # Call Velocity PreLoginEvent.forceOnlineMode() for reserved names.
-    # Requires a proxy with online-mode = false (the BlazeMC setup).
-    force-online-mode: true
-    # Reject the connection if Velocity did not complete a Mojang session.
-    # Never silently downgrade a reserved Premium username to cracked auth.
-    require-mojang-session: true
-    # Compare the authenticated Mojang UUID with the UUID stored at registration.
-    verify-registered-uuid: true
-  cracked:
-    # Track cracked identities separately from Premium profiles.
-    enabled: true
-    # Force offline-mode for usernames that are not reserved. This prevents
-    # LimboAuth or similar plugins from forcing online-mode for unreserved names.
-    preserve-offline-mode: true
-    # Enable the optional LimboAuth compatibility adapter when that plugin is loaded.
-    use-limboauth: true
-
-# Official Mojang profile lookup used ONLY for admin registration/refresh.
-# Login-time Premium decisions use the local database, not this API.
-# Endpoint: https://api.mojang.com/users/profiles/minecraft/{username}
-mojang:
-  api-timeout-ms: 5000
-  # In-memory cache for admin lookups. Cached records in SQLite remain available
-  # during Mojang outages and are always used for reserved-name protection.
-  cache-duration-minutes: 60
-  retry-count: 2
-  # If the Mojang API is down, refuse /bcd premium add and refresh.
-  # An API failure is NEVER treated as proof that an account is cracked.
+# Automatic Premium detection. /bcd premium add is optional and not required
+# for genuine Premium players.
+premium-detection:
+  enabled: true
+  automatic: true
+  require-real-profile: true
+  require-authenticated-session: true
+  verify-mojang-uuid: true
+  force-online-authentication: true
+  never-downgrade-to-cracked: true
+  protect-premium-usernames: true
+  # Reject unknown names when Mojang cannot be reached. Never offline-fallback.
   fail-closed-on-api-error: true
 
-database:
-  # Only SQLite is supported. The file is created automatically on first start.
-  type: sqlite
-  # Path relative to this plugin's data directory.
-  file: database/identities.db
+# Official lookup: https://api.mojang.com/users/profiles/minecraft/{username}
+# 200 = profile exists (id + name). 204/404 = no Java profile.
+# 403/429/5xx/timeouts = unavailable, not cracked.
+mojang:
+  api-timeout-ms: 5000
+  request-timeout-ms: 5000
+  positive-cache-seconds: 300
+  # 0 in strict mode. Do not cache "not found" long enough to create a hole.
+  negative-cache-seconds: 0
+  maximum-concurrent-requests: 20
+  retry-count: 2
+
+cracked:
+  enabled: true
+  # Only a definitive 204/404 may authorize the cracked/offline path.
+  require-definitive-profile-not-found: true
+  preserve-offline-uuid: true
+  use-limboauth: true
 
 limboauth:
-  # Isolated optional adapter. Does not modify LimboAuth's database or internals.
   enabled: true
-  # auto    - attach when the limboauth plugin is present
-  # enabled - attach and warn if LimboAuth is missing
-  # disabled - never attach
-  compatibility-mode: auto
+  # auto | enabled | disabled  (legacy key compatibility-mode is also read)
+  integration-mode: auto
+  prevent-premium-password-login: true
+
+uuid:
+  verify-backend-forwarding: true
+  prevent-premium-offline-uuid: true
+  preserve-existing-cracked-identities: true
+  never-auto-migrate: true
+
+database:
+  type: sqlite
+  file: database/identities.db
 
 logging:
-  log-premium-connections: true
+  log-premium-detection: true
+  log-premium-authentication: true
   log-cracked-connections: true
+  log-uuid-verification: true
   log-authentication-failures: true
 
-# Kick and command text. Adventure MiniMessage is not used; these are plain strings.
 messages:
   prefix: "[BlazeMC Connection Detector] "
   kick-invalid-username: "Invalid Minecraft username."
-  kick-premium-session-missing: "This username is reserved for a Minecraft Premium account. Sign in with the genuine Microsoft account."
+  kick-premium-session-missing: "This username belongs to a Minecraft Premium account. Sign in with the genuine Microsoft account."
   kick-premium-uuid-mismatch: "Premium UUID verification failed. This username is protected."
   kick-premium-auth-failed: "Premium authentication failed. This username cannot be used in offline mode."
   kick-concurrent-login: "A connection for this Premium account is already in progress."
+  kick-mojang-unavailable: "Authentication servers are temporarily unavailable. Please retry in a moment."
+  kick-impersonation: "This username is protected. Cracked launchers cannot use Premium identities."

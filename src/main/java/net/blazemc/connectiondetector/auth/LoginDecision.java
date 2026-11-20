@@ -48,7 +48,7 @@ public final class LoginDecision {
                 AccountType.PREMIUM,
                 AuthenticationResult.PREMIUM_VERIFIED,
                 forwardingUuid,
-                UuidSource.MOJANG_SESSION,
+                UuidSource.MOJANG,
                 account,
                 "premium_verified",
                 false
@@ -59,7 +59,7 @@ public final class LoginDecision {
         return new LoginDecision(
                 Action.ALLOW,
                 AccountType.CRACKED,
-                AuthenticationResult.CRACKED_ALLOWED,
+                AuthenticationResult.CRACKED_CONFIRMED,
                 forwardingUuid,
                 UuidSource.OFFLINE,
                 null,

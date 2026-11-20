@@ -64,7 +64,7 @@ public final class LimboAuthCompatibilityAdapter {
             return;
         }
 
-        if (config.limboauth().isDisabled() || !config.authentication().cracked().useLimboauth()) {
+        if (config.limboauth().isDisabled() || !config.cracked().useLimboauth()) {
             log.info("LimboAuth compatibility adapter is disabled by configuration.");
             return;
         }

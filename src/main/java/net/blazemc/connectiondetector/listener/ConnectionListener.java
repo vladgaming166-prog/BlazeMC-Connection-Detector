@@ -1,18 +1,21 @@
 package net.blazemc.connectiondetector.listener;
 
+import com.velocitypowered.api.event.EventTask;
 import com.velocitypowered.api.event.PostOrder;
+import com.velocitypowered.api.event.ResultedEvent;
 import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.event.connection.LoginEvent;
 import com.velocitypowered.api.event.connection.PostLoginEvent;
 import com.velocitypowered.api.event.connection.PreLoginEvent;
 import com.velocitypowered.api.event.player.GameProfileRequestEvent;
-import com.velocitypowered.api.event.ResultedEvent;
 import com.velocitypowered.api.proxy.InboundConnection;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.util.GameProfile;
 import java.lang.reflect.Method;
+import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import net.blazemc.connectiondetector.PluginServices;
 import net.blazemc.connectiondetector.auth.AuthenticationService;
@@ -30,6 +33,7 @@ import net.blazemc.connectiondetector.config.PluginConfig;
 import net.blazemc.connectiondetector.limboauth.LimboAuthCompatibilityAdapter;
 import net.blazemc.connectiondetector.model.AccountType;
 import net.blazemc.connectiondetector.model.AuthenticationResult;
+import net.blazemc.connectiondetector.model.ConnectionState;
 import net.blazemc.connectiondetector.storage.IdentityRepository;
 import net.blazemc.connectiondetector.util.PluginLog;
 import net.blazemc.connectiondetector.util.Texts;
@@ -74,10 +78,10 @@ public final class ConnectionListener {
     }
 
     @Subscribe(order = PostOrder.LAST)
-    public void onPreLogin(PreLoginEvent event) {
+    public EventTask onPreLogin(PreLoginEvent event) {
         if (!event.getResult().isAllowed() && !event.getResult().isForceOfflineMode()
                 && !event.getResult().isOnlineModeAllowed()) {
-            return;
+            return null;
         }
 
         String username = event.getUsername();
@@ -87,33 +91,66 @@ public final class ConnectionListener {
                 + " claimedUuid=" + claimed
                 + " (claimed UUIDs are never trusted)");
 
-        PreLoginDecision decision = authentication().decidePreLogin(username, connectionId);
-        pendingAuth.put(PendingAuthSession.from(connectionId, username, decision, claimed));
+        Optional<PreLoginDecision> immediate = authentication().tryImmediateDecision(username, connectionId);
+        if (immediate.isPresent()) {
+            applyPreLogin(event, username, connectionId, claimed, immediate.get());
+            return null;
+        }
 
+        return EventTask.resumeWhenComplete(
+                services.mojangApi().lookupByUsernameAsync(username)
+                        .exceptionally(error -> net.blazemc.connectiondetector.auth.MojangLookupResult.error(
+                                error.getMessage(), -1))
+                        .thenAccept(lookup -> {
+                            PreLoginDecision decision = authentication().decideFromLookup(
+                                    username, connectionId, lookup);
+                            applyPreLogin(event, username, connectionId, claimed, decision);
+                        })
+        );
+    }
+
+    private void applyPreLogin(
+            PreLoginEvent event,
+            String username,
+            String connectionId,
+            UUID claimed,
+            PreLoginDecision decision
+    ) {
+        pendingAuth.put(PendingAuthSession.from(connectionId, username, decision, claimed));
         switch (decision.action()) {
             case FORCE_ONLINE -> {
                 event.setResult(PreLoginEvent.PreLoginComponentResult.forceOnlineMode());
-                log.debug(() -> "Forcing online-mode authentication for reserved Premium username " + username);
+                log.premiumDetected(username, decision.autoDetected());
+                log.forcingOnline(username);
             }
-            case FORCE_OFFLINE -> event.setResult(PreLoginEvent.PreLoginComponentResult.forceOfflineMode());
+            case FORCE_OFFLINE -> {
+                event.setResult(PreLoginEvent.PreLoginComponentResult.forceOfflineMode());
+                log.crackedConfirmed(username);
+            }
             case DENY -> {
                 event.setResult(PreLoginEvent.PreLoginComponentResult.denied(kickMessage(decision.result())));
                 authentication().releaseConnection(username, connectionId);
                 pendingAuth.remove(connectionId);
                 recordFailure(username, claimed, decision.result(), "prelogin");
+                if (decision.connectionState() == ConnectionState.MOJANG_API_UNAVAILABLE) {
+                    log.mojangUnavailable(username);
+                } else {
+                    log.authFailure(username);
+                }
             }
         }
     }
 
     @Subscribe(order = PostOrder.LAST)
     public void onGameProfileRequest(GameProfileRequestEvent event) {
+        Optional<PendingAuthSession> pending = pendingAuth.findByUsername(event.getUsername());
         ProfileSnapshot snapshot = new ProfileSnapshot(
                 event.getUsername(),
                 event.getOriginalProfile().getId(),
                 event.getGameProfile().getId(),
                 event.isOnlineMode()
         );
-        ProfileProtectionDecision decision = authentication().protectProfile(snapshot);
+        ProfileProtectionDecision decision = authentication().protectProfile(snapshot, pending);
         if (decision.shouldLeaveUntouched() || decision.uuidToKeep().isEmpty()) {
             return;
         }
@@ -130,44 +167,60 @@ public final class ConnectionListener {
     public void onLogin(LoginEvent event) {
         Player player = event.getPlayer();
         String username = player.getUsername();
-        String connectionId = pendingAuth.findByUsername(username)
-                .map(PendingAuthSession::connectionId)
-                .orElseGet(() -> "login:" + username);
+        Optional<PendingAuthSession> pending = pendingAuth.findByUsername(username);
+        String connectionId = pending.map(PendingAuthSession::connectionId).orElseGet(() -> "login:" + username);
 
         LoginSnapshot snapshot = new LoginSnapshot(
                 username,
                 player.getUniqueId(),
                 player.isOnlineMode(),
                 hasMojangSessionEvidence(event, player),
-                pendingAuth.findByUsername(username).map(PendingAuthSession::clientClaimedUuid).orElse(null)
+                pending.map(PendingAuthSession::clientClaimedUuid).orElse(null)
         );
-        LoginDecision decision = authentication().verifyLogin(snapshot);
+        LoginDecision decision = authentication().verifyLogin(snapshot, pending);
         authentication().releaseConnection(username, connectionId);
-        pendingAuth.findByUsername(username).map(PendingAuthSession::connectionId).ifPresent(pendingAuth::remove);
+        pending.map(PendingAuthSession::connectionId).ifPresent(pendingAuth::remove);
 
         if (!decision.allowed()) {
             event.setResult(ResultedEvent.ComponentResult.denied(kickMessage(decision.result())));
             recordFailure(username, snapshot.uuid(), decision.result(), "login");
-            log.authFailure(username);
-            log.debug(() -> "Denied " + username + " result=" + decision.result()
-                    + " uuid=" + snapshot.uuid()
-                    + " onlineMode=" + snapshot.onlineMode());
+            if (decision.result() == AuthenticationResult.IMPERSONATION_REJECTED
+                    || decision.result() == AuthenticationResult.PREMIUM_SESSION_MISSING
+                    || decision.result() == AuthenticationResult.PREMIUM_OFFLINE_UUID_REJECTED) {
+                log.impersonation(username);
+            } else {
+                log.authFailure(username);
+            }
             return;
         }
 
-        VerifiedSession session = VerifiedSession.from(snapshot, decision);
+        VerifiedSession session = VerifiedSession.from(snapshot, decision, pending.orElse(null));
+        if (config().uuid().verifyBackendForwarding()
+                && session.verifiedPremium()
+                && !session.uuid().equals(session.backendForwardingUuid())) {
+            event.setResult(ResultedEvent.ComponentResult.denied(kickMessage(AuthenticationResult.PREMIUM_UUID_MISMATCH)));
+            log.authFailure(username);
+            return;
+        }
+
         verifiedByPlayer.put(player.getUniqueId(), session);
 
         if (session.verifiedPremium()) {
-            registration().recordSuccessfulAuth(session.uuid(), username);
+            registration().persistVerified(username, session.uuid());
+            if (config().uuid().preserveExistingCrackedIdentities()) {
+                identities.recordSuccessfulIdentity(session);
+            } else {
+                identities.recordSuccessfulIdentity(session);
+            }
+            identities.recordHistory(session, session.autoDetected() ? "automatic premium verified" : "premium verified");
+            if (config().limboauth().preventPremiumPasswordLogin()) {
+                limboAuth.markVerifiedPremium(player);
+            }
+            log.premiumVerified(username);
+            log.uuidVerified(session.uuid());
+        } else if (config().cracked().enabled()) {
             identities.recordSuccessfulIdentity(session);
-            identities.recordHistory(session, "premium verified");
-            limboAuth.markVerifiedPremium(player);
-            log.premium(username);
-            log.info("UUID verification successful.");
-        } else if (config().authentication().cracked().enabled()) {
-            identities.recordSuccessfulIdentity(session);
-            identities.recordHistory(session, "cracked allowed");
+            identities.recordHistory(session, "cracked confirmed");
             log.cracked(username);
         }
     }
@@ -176,7 +229,7 @@ public final class ConnectionListener {
     public void onPostLogin(PostLoginEvent event) {
         Player player = event.getPlayer();
         VerifiedSession session = verifiedByPlayer.get(player.getUniqueId());
-        if (session != null && session.verifiedPremium()) {
+        if (session != null && session.verifiedPremium() && config().limboauth().preventPremiumPasswordLogin()) {
             limboAuth.notifyPremiumLogin(player);
         }
         log.debug(() -> {
@@ -185,6 +238,7 @@ public final class ConnectionListener {
             }
             return "PostLogin " + player.getUsername()
                     + " type=" + session.accountType()
+                    + " state=" + session.connectionState()
                     + " uuid=" + session.uuid()
                     + " forwarding=" + session.backendForwardingUuid()
                     + " onlineMode=" + player.isOnlineMode();
@@ -226,7 +280,8 @@ public final class ConnectionListener {
             case INVALID_USERNAME -> Texts.kick(messages.kickInvalidUsername());
             case CONCURRENT_LOGIN_DENIED -> Texts.kick(messages.kickConcurrentLogin());
             case PREMIUM_UUID_MISMATCH, PREMIUM_OFFLINE_UUID_REJECTED -> Texts.kick(messages.kickPremiumUuidMismatch());
-            case PREMIUM_SESSION_MISSING -> Texts.kick(messages.kickPremiumSessionMissing());
+            case PREMIUM_SESSION_MISSING, IMPERSONATION_REJECTED -> Texts.kick(messages.kickImpersonation());
+            case MOJANG_API_UNAVAILABLE -> Texts.kick(messages.kickMojangUnavailable());
             default -> Texts.kick(messages.kickPremiumAuthFailed());
         };
     }
@@ -237,8 +292,7 @@ public final class ConnectionListener {
 
     /**
      * {@code LoginEvent#getServerIdHash()} exists on Velocity 3.5+. Older 3.x
-     * builds only expose {@link Player#isOnlineMode()}, which is still a completed
-     * Mojang session when true after {@code forceOnlineMode()}.
+     * builds only expose {@link Player#isOnlineMode()}.
      */
     static boolean hasMojangSessionEvidence(LoginEvent event, Player player) {
         if (!player.isOnlineMode()) {
@@ -247,15 +301,13 @@ public final class ConnectionListener {
         try {
             Method method = event.getClass().getMethod("getServerIdHash");
             Object hash = method.invoke(event);
-            if (hash == null) {
-                return false;
-            }
-            String value = String.valueOf(hash);
-            return !value.isBlank();
+            // Additional Velocity 3.5+ evidence. An empty hash does not override
+            // Player.isOnlineMode() after forceOnlineMode().
+            return hash == null || !String.valueOf(hash).isBlank() || player.isOnlineMode();
         } catch (NoSuchMethodException ignored) {
             return true;
         } catch (ReflectiveOperationException ignored) {
-            return player.isOnlineMode();
+            return true;
         }
     }
 }

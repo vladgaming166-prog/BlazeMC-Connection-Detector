@@ -8,20 +8,25 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class MojangProfileCache {
 
     private final ConcurrentHashMap<String, CacheEntry> entries = new ConcurrentHashMap<>();
-    private final Duration ttl;
+    private volatile Duration positiveTtl;
+    private volatile Duration negativeTtl;
 
-    public MojangProfileCache(Duration ttl) {
-        this.ttl = ttl;
+    public MojangProfileCache(Duration positiveTtl, Duration negativeTtl) {
+        this.positiveTtl = positiveTtl;
+        this.negativeTtl = negativeTtl;
+    }
+
+    public void updateTtl(Duration positiveTtl, Duration negativeTtl) {
+        this.positiveTtl = positiveTtl;
+        this.negativeTtl = negativeTtl;
     }
 
     public Optional<MojangLookupResult> get(String username) {
-        if (ttl.isZero() || ttl.isNegative()) {
-            return Optional.empty();
-        }
-        CacheEntry entry = entries.get(UsernameValidator.normalizeKey(username));
+        String key = UsernameValidator.normalizeKey(username);
+        CacheEntry entry = entries.get(key);
         if (entry == null || Instant.now().isAfter(entry.expiresAt())) {
             if (entry != null) {
-                entries.remove(UsernameValidator.normalizeKey(username), entry);
+                entries.remove(key, entry);
             }
             return Optional.empty();
         }
@@ -29,16 +34,31 @@ public final class MojangProfileCache {
     }
 
     public void put(String username, MojangLookupResult result) {
-        if (ttl.isZero() || ttl.isNegative()) {
+        if (result.isUnavailable()) {
             return;
         }
-        if (result.isUnavailable()) {
+        Duration ttl = result.status() == MojangLookupResult.Status.NOT_FOUND ? negativeTtl : positiveTtl;
+        if (ttl.isZero() || ttl.isNegative()) {
             return;
         }
         entries.put(
                 UsernameValidator.normalizeKey(username),
                 new CacheEntry(result, Instant.now().plus(ttl))
         );
+        if (result.profile().isPresent()) {
+            entries.put(
+                    UsernameValidator.normalizeKey(result.profile().get().canonicalUsername()),
+                    new CacheEntry(result, Instant.now().plus(ttl))
+            );
+        }
+    }
+
+    public void invalidate(String username) {
+        String key = UsernameValidator.normalizeKey(username);
+        CacheEntry removed = entries.remove(key);
+        if (removed != null && removed.result().profile().isPresent()) {
+            entries.remove(UsernameValidator.normalizeKey(removed.result().profile().get().canonicalUsername()));
+        }
     }
 
     public void clear() {

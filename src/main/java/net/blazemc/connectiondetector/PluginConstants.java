@@ -4,7 +4,7 @@ public final class PluginConstants {
 
     public static final String ID = "blazemc-connection-detector";
     public static final String NAME = "BlazeMC Connection Detector";
-    public static final String VERSION = "1.0.0";
+    public static final String VERSION = "1.1.0";
     public static final String AUTHOR = "BlazeMC Network";
     public static final String LOG_PREFIX = "[BlazeMC Connection Detector] ";
 

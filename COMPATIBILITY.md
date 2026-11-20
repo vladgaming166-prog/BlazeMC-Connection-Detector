@@ -11,21 +11,22 @@ BlazeMC Connection Detector is a native Velocity plugin. It uses only the public
 | LimboAuth | 1.1.14 | Optional reflection adapter |
 | LimboAPI | 1.1.27-SNAPSHOT | Optional; not loaded or modified by this plugin |
 
-Automated tests run against the plugin's own authentication engine, SQLite storage, Mojang payload parser, and LimboAuth bypass policy. They do not start a live Velocity process.
+Automated tests run against the plugin's own authentication engine, SQLite storage, Mojang HTTP client (local mock server), payload parser, and LimboAuth bypass policy. They do not start a live Velocity process and do not perform a real Microsoft session.
 
 ## Velocity 3.x
 
 Public APIs this plugin depends on:
 
 - `PreLoginEvent` / `PreLoginComponentResult.forceOnlineMode()` / `forceOfflineMode()`
-- `GameProfileRequestEvent` and `GameProfile.withId(UUID)`
+- `EventTask.resumeWhenComplete(CompletableFuture)` for asynchronous PreLogin lookups
+- `GameProfileRequestEvent` and `GameProfile.withId(UUID)` (restore only; never invents a profile)
 - `LoginEvent`, `PostLoginEvent`, `DisconnectEvent`
 - `Player.isOnlineMode()`, `Player.getUniqueId()`, `Player.getGameProfile()`
 - `SimpleCommand`, `@Plugin`, `@Subscribe`, `PostOrder`
 
 `forceOnlineMode()` / `forceOfflineMode()` exist in the Velocity 3.4 and 3.5 public javadocs and were introduced for hybrid offline proxies in the 3.1 line.
 
-`LoginEvent.getServerIdHash()` is Velocity 3.5+. The plugin calls it only through reflection. On older 3.x proxies, `Player.isOnlineMode()` after `forceOnlineMode()` is the session evidence.
+`LoginEvent.getServerIdHash()` is Velocity 3.5+. The plugin reads it only when the method exists. On older 3.x proxies, `Player.isOnlineMode()` after `forceOnlineMode()` is the session evidence.
 
 This plugin does **not** claim support for:
 
@@ -47,7 +48,7 @@ Integration method: optional adapter, no compile dependency, no LimboAuth databa
 
 LimboAuth 1.1.14 already skips cracked auth when `player.isOnlineMode()` is true and the stored hash is empty. This plugin still calls `cacheAuthUser` and `BYPASS` so Premium players are not sent to the auth limbo if `ONLINE-MODE-NEED-AUTH` is enabled.
 
-Conflict to avoid: LimboAuth's `FORCE-OFFLINE-UUID` would rewrite Premium UUIDs at `GameProfileRequestEvent` `FIRST`. This plugin restores the Mojang UUID at `LAST`. Disable `FORCE-OFFLINE-UUID` anyway.
+Exact conflict: LimboAuth's `FORCE-OFFLINE-UUID` rewrites Premium UUIDs at `GameProfileRequestEvent` `FIRST`. Safest resolution: set `FORCE-OFFLINE-UUID: false`. This plugin also restores the authenticated Mojang UUID at `LAST` if another plugin changed it. It does not generate a new identity.
 
 ## PremiumOrCracked
 
@@ -59,3 +60,5 @@ Designed for Velocity **modern** forwarding to Paper. The UUID Velocity forwards
 
 - Premium: Mojang UUID from the authenticated session
 - Cracked: Velocity's offline UUID (unchanged)
+
+Paper `proxies.velocity.online-mode` should remain `false` because the proxy itself is offline-mode; individual Premium connections are still authenticated by Velocity before forwarding. The forwarded UUID is the authenticated one.

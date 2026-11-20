@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.UUID;
 import net.blazemc.connectiondetector.config.PluginConfig;
+import net.blazemc.connectiondetector.model.PremiumAccount;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -84,5 +85,16 @@ class PremiumRegistrationServiceTest {
     void notFoundIsNotTreatedAsApiFailure() {
         PremiumRegistrationService.Result result = service.add("CrackedGuy");
         assertEquals(PremiumRegistrationService.Outcome.NOT_PREMIUM, result.outcome());
+    }
+
+    @Test
+    void persistVerifiedStoresAutomaticPremiumUuidWithoutDeletingOthers() {
+        PremiumAccount created = service.persistVerified("Blaz3Craft", BLAZE_UUID);
+        assertEquals(BLAZE_UUID, created.mojangUuid());
+        assertEquals("Blaz3Craft", store.findByUuid(BLAZE_UUID).orElseThrow().canonicalUsername());
+        PremiumAccount updated = service.persistVerified("BlazeCraft", BLAZE_UUID);
+        assertEquals("BlazeCraft", updated.canonicalUsername());
+        assertEquals(1, store.listAll().size());
+        assertEquals(BLAZE_UUID, store.findByUsername("BlazeCraft").orElseThrow().mojangUuid());
     }
 }

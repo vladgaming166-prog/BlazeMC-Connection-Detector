@@ -37,15 +37,55 @@ public final class PluginLog {
         }
     }
 
-    public void premium(String username) {
-        if (config.logging().logPremiumConnections()) {
+    public void premiumDetected(String username, boolean autoDetected) {
+        if (config.logging().logPremiumDetection()) {
+            info((autoDetected ? "Automatic Premium profile detected: " : "Reserved Premium profile detected: ")
+                    + username);
+        }
+    }
+
+    public void forcingOnline(String username) {
+        if (config.logging().logPremiumDetection()) {
+            info("Forcing Mojang session authentication.");
+            debug(() -> "Online authentication required for " + username);
+        }
+    }
+
+    public void premiumVerified(String username) {
+        if (config.logging().logPremiumAuthentication()) {
+            info("Premium session successfully verified.");
             info("PREMIUM connection verified: " + username);
         }
     }
 
-    public void cracked(String username) {
+    public void uuidVerified(java.util.UUID uuid) {
+        if (config.logging().logUuidVerification()) {
+            info("Premium UUID verified: " + uuid);
+            info("UUID verification successful.");
+        }
+    }
+
+    public void crackedConfirmed(String username) {
         if (config.logging().logCrackedConnections()) {
-            info("CRACKED connection detected: " + username);
+            info("Cracked profile confirmed: " + username);
+        }
+    }
+
+    public void cracked(String username) {
+        crackedConfirmed(username);
+    }
+
+    public void impersonation(String username) {
+        if (config.logging().logAuthenticationFailures()) {
+            info("Premium impersonation attempt rejected.");
+            debug(() -> "Rejected impersonation of " + username);
+        }
+    }
+
+    public void mojangUnavailable(String username) {
+        if (config.logging().logAuthenticationFailures()) {
+            info("Mojang API unavailable. Connection rejected safely.");
+            debug(() -> "Fail-closed reject for " + username);
         }
     }
 

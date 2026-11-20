@@ -37,7 +37,7 @@ import org.slf4j.Logger;
         id = PluginConstants.ID,
         name = PluginConstants.NAME,
         version = PluginConstants.VERSION,
-        description = "Selective Premium authentication and UUID protection for BlazeMC Network",
+        description = "Automatic Premium detection, UUID protection, and hybrid Cracked authentication for BlazeMC Network",
         authors = {PluginConstants.AUTHOR},
         dependencies = {
                 @Dependency(id = "limboauth", optional = true),
@@ -121,8 +121,16 @@ public final class BlazeMcConnectionDetectorPlugin {
 
     private void rebuildAuthServices(PluginConfig config) {
         services.setAuthentication(new AuthenticationService(premiumStore, config, loginGuard));
-        mojangCache = new MojangProfileCache(Duration.ofMinutes(config.mojang().cacheDurationMinutes()));
+        Duration positive = Duration.ofSeconds(config.mojang().positiveCacheSeconds());
+        Duration negative = Duration.ofSeconds(config.negativeCacheSeconds());
+        if (mojangCache == null) {
+            mojangCache = new MojangProfileCache(positive, negative);
+        } else {
+            mojangCache.updateTtl(positive, negative);
+        }
+        services.setMojangCache(mojangCache);
         MojangApi mojangApi = new CachedMojangApi(new HttpMojangApi(config), mojangCache);
+        services.setMojangApi(mojangApi);
         services.setRegistration(new PremiumRegistrationService(premiumStore, mojangApi, config));
         services.setInspector(new IdentityInspector(premiumStore, services.identities()));
     }
@@ -160,11 +168,14 @@ public final class BlazeMcConnectionDetectorPlugin {
         if (!"sqlite".equalsIgnoreCase(config.database().type())) {
             throw new IllegalStateException("Only SQLite is supported. Set database.type to sqlite.");
         }
-        if (config.authentication().premium().enabled() && !config.authentication().premium().forceOnlineMode()) {
-            log.warn("Premium protection is enabled without force-online-mode. Impersonation protection is weakened.");
+        if (config.premiumDetection().enabled() && !config.premiumDetection().forceOnlineAuthentication()) {
+            log.warn("Premium detection is enabled without force-online-authentication. Impersonation protection is weakened.");
         }
-        if (config.authentication().premium().enabled() && !config.authentication().premium().requireMojangSession()) {
-            log.warn("require-mojang-session is disabled. Reserved Premium names may be accepted without a Mojang session.");
+        if (config.premiumDetection().enabled() && !config.premiumDetection().requireAuthenticatedSession()) {
+            log.warn("require-authenticated-session is disabled. Premium names may be accepted without a Mojang session.");
+        }
+        if (!config.failClosed()) {
+            log.warn("Fail-closed security is disabled. Mojang API errors may allow unverified offline logins.");
         }
     }
 

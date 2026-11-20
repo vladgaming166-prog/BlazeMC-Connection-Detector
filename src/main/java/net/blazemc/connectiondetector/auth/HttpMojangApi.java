@@ -1,6 +1,5 @@
 package net.blazemc.connectiondetector.auth;
 
-import java.io.IOException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -8,6 +7,11 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import net.blazemc.connectiondetector.PluginConstants;
 import net.blazemc.connectiondetector.config.PluginConfig;
 
@@ -17,77 +21,126 @@ public final class HttpMojangApi implements MojangApi {
 
     private final HttpClient client;
     private final PluginConfig config;
+    private final Semaphore inflight;
+    private final String endpointPrefix;
+    private static final Executor LIMITER_EXECUTOR = Executors.newCachedThreadPool(runnable -> {
+        Thread thread = new Thread(runnable, "blazemc-mojang-limiter");
+        thread.setDaemon(true);
+        return thread;
+    });
+
+    private final Executor limiterExecutor = LIMITER_EXECUTOR;
 
     public HttpMojangApi(PluginConfig config) {
         this(config, HttpClient.newBuilder()
                 .connectTimeout(Duration.ofMillis(config.mojang().apiTimeoutMs()))
                 .followRedirects(HttpClient.Redirect.NORMAL)
-                .build());
+                .build(), PROFILE_ENDPOINT);
     }
 
     public HttpMojangApi(PluginConfig config, HttpClient client) {
+        this(config, client, PROFILE_ENDPOINT);
+    }
+
+    public HttpMojangApi(PluginConfig config, HttpClient client, String endpointPrefix) {
         this.config = config;
         this.client = client;
+        this.inflight = new Semaphore(config.mojang().maximumConcurrentRequests());
+        this.endpointPrefix = endpointPrefix.endsWith("/") ? endpointPrefix : endpointPrefix + "/";
     }
 
     @Override
-    public MojangLookupResult lookupByUsername(String username) {
+    public CompletableFuture<MojangLookupResult> lookupByUsernameAsync(String username) {
         if (!UsernameValidator.isValid(username)) {
-            return MojangLookupResult.error("invalid username", 400);
+            return CompletableFuture.completedFuture(MojangLookupResult.error("invalid username", 400));
         }
-
-        MojangLookupResult lastError = MojangLookupResult.error("unknown", -1);
-        int attempts = config.mojang().retryCount() + 1;
-        for (int attempt = 1; attempt <= attempts; attempt++) {
-            MojangLookupResult result = executeOnce(username);
-            if (result.status() == MojangLookupResult.Status.FOUND
-                    || result.status() == MojangLookupResult.Status.NOT_FOUND) {
-                return result;
-            }
-            lastError = result;
-            if (result.status() != MojangLookupResult.Status.RATE_LIMITED
-                    && result.status() != MojangLookupResult.Status.TIMEOUT
-                    && result.status() != MojangLookupResult.Status.ERROR) {
-                return result;
-            }
-        }
-        return lastError;
+        return attempt(username, 1);
     }
 
-    private MojangLookupResult executeOnce(String username) {
+    private CompletableFuture<MojangLookupResult> attempt(String username, int attempt) {
+        return acquirePermitAsync().thenCompose(ignored ->
+                executeOnceAsync(username).whenComplete((result, error) -> inflight.release())
+                        .thenCompose(result -> {
+                            if (shouldRetry(result) && attempt <= config.mojang().retryCount()) {
+                                long delayMs = (long) Math.pow(2, attempt - 1) * 200L;
+                                CompletableFuture<MojangLookupResult> delayed = new CompletableFuture<>();
+                                CompletableFuture.delayedExecutor(delayMs, TimeUnit.MILLISECONDS)
+                                        .execute(() -> attempt(username, attempt + 1)
+                                                .whenComplete((retried, retryError) -> {
+                                                    if (retryError != null) {
+                                                        delayed.complete(mapFailure(retryError));
+                                                    } else {
+                                                        delayed.complete(retried);
+                                                    }
+                                                }));
+                                return delayed;
+                            }
+                            return CompletableFuture.completedFuture(result);
+                        })
+                        .exceptionally(HttpMojangApi::mapFailure)
+        );
+    }
+
+    private CompletableFuture<Void> acquirePermitAsync() {
+        if (inflight.tryAcquire()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return CompletableFuture.runAsync(() -> {
+            try {
+                inflight.acquire();
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("interrupted waiting for Mojang API permit", ex);
+            }
+        }, limiterExecutor);
+    }
+
+    private boolean shouldRetry(MojangLookupResult result) {
+        return result.status() == MojangLookupResult.Status.RATE_LIMITED
+                || result.status() == MojangLookupResult.Status.TIMEOUT
+                || result.status() == MojangLookupResult.Status.ERROR;
+    }
+
+    private CompletableFuture<MojangLookupResult> executeOnceAsync(String username) {
         String encoded = URLEncoder.encode(username, StandardCharsets.UTF_8);
-        HttpRequest request = HttpRequest.newBuilder(URI.create(PROFILE_ENDPOINT + encoded))
-                .timeout(Duration.ofMillis(config.mojang().apiTimeoutMs()))
+        HttpRequest request = HttpRequest.newBuilder(URI.create(endpointPrefix + encoded))
+                .timeout(Duration.ofMillis(config.mojang().requestTimeoutMs()))
                 .header("Accept", "application/json")
                 .header("User-Agent", PluginConstants.NAME + "/" + PluginConstants.VERSION)
                 .GET()
                 .build();
-        try {
-            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-            int status = response.statusCode();
-            if (status == 200) {
-                return MojangProfileParser.parse(response.body())
-                        .map(MojangLookupResult::found)
-                        .orElseGet(() -> MojangLookupResult.invalidResponse("malformed Mojang profile payload", status));
-            }
-            if (status == 204 || status == 404) {
-                return MojangLookupResult.notFound();
-            }
-            if (status == 429) {
-                return MojangLookupResult.rateLimited(status);
-            }
-            return MojangLookupResult.error("HTTP " + status, status);
-        } catch (java.net.http.HttpTimeoutException ex) {
-            return MojangLookupResult.timeout(ex.getMessage());
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            return MojangLookupResult.error("interrupted", -1);
-        } catch (IOException ex) {
-            String message = ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage();
-            if (message.toLowerCase().contains("timed out") || message.toLowerCase().contains("timeout")) {
-                return MojangLookupResult.timeout(message);
-            }
-            return MojangLookupResult.error(message, -1);
+        return client.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+                .thenApply(this::toResult)
+                .exceptionally(HttpMojangApi::mapFailure);
+    }
+
+    MojangLookupResult toResult(HttpResponse<String> response) {
+        int status = response.statusCode();
+        if (status == 200) {
+            return MojangProfileParser.parse(response.body())
+                    .map(MojangLookupResult::found)
+                    .orElseGet(() -> MojangLookupResult.invalidResponse("malformed Mojang profile payload", status));
         }
+        if (status == 204 || status == 404) {
+            return MojangLookupResult.notFound();
+        }
+        if (status == 429) {
+            return MojangLookupResult.rateLimited(status);
+        }
+        if (status == 403) {
+            return MojangLookupResult.error("HTTP 403", status);
+        }
+        return MojangLookupResult.error("HTTP " + status, status);
+    }
+
+    static MojangLookupResult mapFailure(Throwable error) {
+        Throwable cause = error.getCause() == null ? error : error.getCause();
+        String message = cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
+        if (cause instanceof java.net.http.HttpTimeoutException
+                || message.toLowerCase().contains("timed out")
+                || message.toLowerCase().contains("timeout")) {
+            return MojangLookupResult.timeout(message);
+        }
+        return MojangLookupResult.error(message, -1);
     }
 }

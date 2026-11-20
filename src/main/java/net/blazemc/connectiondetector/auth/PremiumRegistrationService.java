@@ -162,14 +162,38 @@ public final class PremiumRegistrationService {
     }
 
     public void recordSuccessfulAuth(UUID mojangUuid, String username) {
-        store.findByUuid(mojangUuid).ifPresent(account -> recordSuccessfulAuth(account, username));
+        persistVerified(username, mojangUuid);
+    }
+
+    /**
+     * Persist a session-verified Premium identity so later Mojang outages still
+     * force online authentication. Never deletes cracked identity rows.
+     */
+    public PremiumAccount persistVerified(String username, UUID mojangUuid) {
+        Instant now = Instant.now();
+        Optional<PremiumAccount> byUuid = store.findByUuid(mojangUuid);
+        if (byUuid.isPresent()) {
+            PremiumAccount updated = byUuid.get().withCanonicalUsername(
+                    username.equalsIgnoreCase(byUuid.get().canonicalUsername())
+                            ? byUuid.get().canonicalUsername()
+                            : username,
+                    now
+            ).withSuccessfulAuth(username, now);
+            store.update(updated);
+            return updated;
+        }
+        Optional<PremiumAccount> byName = store.findByUsername(username);
+        if (byName.isPresent() && byName.get().mojangUuid().equals(mojangUuid)) {
+            PremiumAccount updated = byName.get().withSuccessfulAuth(username, now);
+            store.update(updated);
+            return updated;
+        }
+        PremiumAccount created = new PremiumAccount(username, mojangUuid, now, now, username, now);
+        store.insert(created);
+        return created;
     }
 
     private Result unavailable(MojangLookupResult lookup) {
-        String detail = lookup.detail() + " (HTTP " + lookup.httpStatus() + ")";
-        if (config.mojang().failClosedOnApiError()) {
-            return new Result(Outcome.API_UNAVAILABLE, null, detail);
-        }
-        return new Result(Outcome.API_UNAVAILABLE, null, detail);
+        return new Result(Outcome.API_UNAVAILABLE, null, lookup.detail() + " (HTTP " + lookup.httpStatus() + ")");
     }
 }
